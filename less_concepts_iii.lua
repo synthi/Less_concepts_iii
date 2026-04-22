@@ -1,4 +1,4 @@
---- less concepts iii (v5.0 - THE MASTERPIECE)
+--- less concepts iii (v5.1 - THE MASTERPIECE)
 --- Monolithic Standalone Port for iii
 ---
 --- PAGE 1: PERFORMANCE
@@ -30,9 +30,10 @@
 --- R6: BPM Coarse 60-210 (1-16)
 --- R7: BPM Fine +0..+9 (1-10)
 --- R8: Page Nav (14-16)
+--- less concepts iii (v5.1 - TIGHT TIMING & MPE)
+--- Monolithic Standalone Port for iii
 
-
-local FPS = 60
+local FPS = 30 -- Reduced to 30fps to guarantee zero MIDI jitter
 local PPQN = 24
 
 local lut_sin = {}
@@ -55,7 +56,7 @@ local st = {
     olafur_on = false, mpe_in = false, mpe_out = false,
     clock_in = false, clock_out = false, midi_in_ch = 1, midi_out_ch = 1,
     mpe_vel_amt = 8, mpe_ratchet_amt = 4, mpe_timbre_amt = 8, cycle_mode = 0,
-    active_snap = 0
+    active_snap = 0, momentary = {false, false}
 }
 
 local v = {
@@ -63,7 +64,6 @@ local v = {
     { bits = {0,0,0,0,0,0,0,1}, mute = false, oct = 0, gate_prob = 16, trans_prob = 1, active_notes = {} }
 }
 
--- Zero-Allocation Note Tracking (Added last_vel for ratcheting)
 for i=1,2 do
     for j=1, 16 do v[i].active_notes[j] = {note=0, ch=0, last_vel=0, active=false} end
 end
@@ -246,7 +246,10 @@ end
 local function unpack_state(s)
     if not s then return end
     for k,val in pairs(s) do 
-        if st[k] ~= nil and type(st[k]) ~= "table" then st[k] = val end 
+        -- DO NOT load BPM or momentary states from snapshots to prevent jitter/jumps
+        if st[k] ~= nil and type(st[k]) ~= "table" and k ~= "bpm_coarse" and k ~= "bpm_fine" and k ~= "bpm" then 
+            st[k] = val 
+        end 
     end
     v[1].bits = {table.unpack(s.v1_bits)}
     v[2].bits = {table.unpack(s.v2_bits)}
@@ -295,7 +298,6 @@ local function seq_tick()
     if st.time_div == 2 then step_ticks = 12
     elseif st.time_div == 3 then step_ticks = 6 end
 
-    -- Main CA Step
     if tick_counter % step_ticks == 0 then
         notes_off(1)
         notes_off(2)
@@ -303,18 +305,17 @@ local function seq_tick()
         trigger_voice(1)
         trigger_voice(2)
         
-        -- Cycle Snapshots every 96 ticks (1 bar)
         if tick_counter == 0 then cycle_snapshots() end
     else
-        -- Sub-step Per-Note Ratcheting
         if st.mpe_ratchet_amt > 1 then
             for voice_idx = 1, 2 do
                 for j = 1, 16 do
                     local n = v[voice_idx].active_notes[j]
                     if n.active then
+                        -- CC2 overrides/adds to MPE CC74 if pushed
                         local r_val = global_cc2
                         if st.mpe_in and st.olafur_on and olafur_cc74[n.note] then
-                            r_val = olafur_cc74[n.note]
+                            r_val = math.max(global_cc2, olafur_cc74[n.note])
                         end
                         
                         local sub_div = 0
@@ -335,11 +336,13 @@ local function seq_tick()
 end
 
 local function update_tempo()
-    st.bpm = 60 + (st.bpm_coarse * 10) + st.bpm_fine
-    if st.clock_in then
-        if metro_seq then metro_seq:stop() end
-    else
-        if metro_seq then metro_seq:start(60.0 / (st.bpm * 24)) end
+    local new_bpm = 60 + (st.bpm_coarse * 10) + st.bpm_fine
+    if new_bpm ~= st.bpm then
+        st.bpm = new_bpm
+        if not st.clock_in and metro_seq then
+            -- Update time without restarting phase (fixes jitter)
+            metro_seq.time = 60.0 / (st.bpm * 24)
+        end
     end
 end
 
@@ -443,6 +446,8 @@ local function draw_page_1()
         g_buf[i][5] = (st.high == i) and 13 or 3
     end
 
+    g_buf[1][6] = st.momentary[1] and 6 or 6
+    g_buf[2][6] = st.momentary[2] and 6 or 6
     g_buf[8][6] = st.olafur_on and lut_sin[(frame_counter % 60) + 1] or 4
     for i=9, 11 do g_buf[i][6] = (st.cycle_mode == i-8) and 14 or 5 end
 
@@ -559,7 +564,6 @@ function event_grid(x, y, z)
             elseif x == 9 then v[2].mute = not v[2].mute
             elseif x >= 10 then v[2].oct = x - 13 end
         elseif y == 3 and is_press then
-            -- Specific Randomizations
             if x == 1 then st.seed = math.random(0, 255); update_binaries()
             elseif x == 2 then st.rule = math.random(0, 255); update_binaries()
             elseif x == 4 then v[1].bits[math.random(1,8)] = 1 - v[1].bits[math.random(1,8)]
@@ -585,7 +589,7 @@ function event_grid(x, y, z)
                 snap_press_time[x] = frame_counter
             else
                 local dur = frame_counter - snap_press_time[x]
-                if dur > 48 then 
+                if dur > 24 then -- Long press (>800ms at 30fps)
                     snaps[x] = nil
                     pset_write(x, nil)
                     if st.active_snap == x then st.active_snap = 0 end
@@ -595,7 +599,7 @@ function event_grid(x, y, z)
                         pset_write(x, snaps[x])
                         st.active_snap = x
                     else
-                        if frame_counter - snap_last_tap[x] < 18 then 
+                        if frame_counter - snap_last_tap[x] < 9 then -- Double tap (<300ms at 30fps)
                             snaps[x] = pack_state()
                             pset_write(x, snaps[x])
                             st.active_snap = x
