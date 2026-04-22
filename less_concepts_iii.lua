@@ -1,4 +1,4 @@
---- less concepts iii (v5.1 - THE MASTERPIECE)
+--- less concepts iii (v6.0 - ZERO JITTER & FULL MPE)
 --- Monolithic Standalone Port for iii
 ---
 --- PAGE 1: PERFORMANCE
@@ -30,16 +30,10 @@
 --- R6: BPM Coarse 60-210 (1-16)
 --- R7: BPM Fine +0..+9 (1-10)
 --- R8: Page Nav (14-16)
---- less concepts iii (v5.1 - TIGHT TIMING & MPE)
---- Monolithic Standalone Port for iii
 
-local FPS = 30 -- Reduced to 30fps to guarantee zero MIDI jitter
-local PPQN = 24
 
-local lut_sin = {}
-for i = 1, 60 do
-    lut_sin[i] = math.floor(11 + 3 * math.sin((i / 60) * math.pi * 2))
-end
+local dirty = true
+local beat_flash = false
 
 local scales = {
     {0, 2, 4, 5, 7, 9, 11}, {0, 2, 3, 5, 7, 8, 10}, {0, 2, 3, 5, 7, 9, 10},
@@ -83,20 +77,6 @@ end
 local global_cc1 = 64
 local global_cc2 = 64
 
-local g_buf = {}
-local g_shd = {}
-local g_press = {}
-for x = 1, 16 do
-    g_buf[x] = {}
-    g_shd[x] = {}
-    g_press[x] = {}
-    for y = 1, 8 do
-        g_buf[x][y] = 0
-        g_shd[x][y] = -1
-        g_press[x][y] = false
-    end
-end
-
 local snaps = {}
 local snap_press_time = {}
 local snap_last_tap = {}
@@ -107,7 +87,6 @@ for i = 1, 16 do
 end
 
 local tick_counter = 0
-local frame_counter = 0
 local mpe_out_rotator = 2
 local is_playing = true
 local metro_seq = nil
@@ -121,6 +100,7 @@ local function update_binaries()
         seed_bin[8-i] = (st.seed >> i) & 1
         rule_bin[8-i] = (st.rule >> i) & 1
     end
+    dirty = true
 end
 
 local function bang()
@@ -246,7 +226,6 @@ end
 local function unpack_state(s)
     if not s then return end
     for k,val in pairs(s) do 
-        -- DO NOT load BPM or momentary states from snapshots to prevent jitter/jumps
         if st[k] ~= nil and type(st[k]) ~= "table" and k ~= "bpm_coarse" and k ~= "bpm_fine" and k ~= "bpm" then 
             st[k] = val 
         end 
@@ -287,7 +266,7 @@ local function cycle_snapshots()
 end
 
 -- ============================================================
--- TIME ENGINE (WITH PER-NOTE RATCHET)
+-- TIME ENGINE (24 PPQN)
 -- ============================================================
 local function seq_tick()
     if not is_playing then return end
@@ -298,21 +277,32 @@ local function seq_tick()
     if st.time_div == 2 then step_ticks = 12
     elseif st.time_div == 3 then step_ticks = 6 end
 
+    -- Beat Flash Logic (Quarter Note)
+    if tick_counter % 24 == 0 then
+        beat_flash = true
+        dirty = true
+    elseif tick_counter % 24 == 6 then
+        beat_flash = false
+        dirty = true
+    end
+
+    -- Main CA Step
     if tick_counter % step_ticks == 0 then
         notes_off(1)
         notes_off(2)
         bang()
         trigger_voice(1)
         trigger_voice(2)
+        dirty = true
         
         if tick_counter == 0 then cycle_snapshots() end
     else
+        -- Sub-step Per-Note Ratcheting
         if st.mpe_ratchet_amt > 1 then
             for voice_idx = 1, 2 do
                 for j = 1, 16 do
                     local n = v[voice_idx].active_notes[j]
                     if n.active then
-                        -- CC2 overrides/adds to MPE CC74 if pushed
                         local r_val = global_cc2
                         if st.mpe_in and st.olafur_on and olafur_cc74[n.note] then
                             r_val = math.max(global_cc2, olafur_cc74[n.note])
@@ -340,10 +330,10 @@ local function update_tempo()
     if new_bpm ~= st.bpm then
         st.bpm = new_bpm
         if not st.clock_in and metro_seq then
-            -- Update time without restarting phase (fixes jitter)
             metro_seq.time = 60.0 / (st.bpm * 24)
         end
     end
+    dirty = true
 end
 
 -- ============================================================
@@ -364,6 +354,7 @@ function event_midi(b1, b2, b3)
         is_playing = false
         notes_off(1)
         notes_off(2)
+        dirty = true
         return
     end
 
@@ -378,6 +369,7 @@ function event_midi(b1, b2, b3)
             if not exists and olafur_count < 128 then
                 olafur_count = olafur_count + 1
                 olafur_notes[olafur_count] = b2
+                dirty = true
             end
         end
     elseif status == 0x80 or (status == 0x90 and b3 == 0) then
@@ -386,6 +378,7 @@ function event_midi(b1, b2, b3)
                 if olafur_notes[i] == b2 then
                     olafur_notes[i] = olafur_notes[olafur_count]
                     olafur_count = olafur_count - 1
+                    dirty = true
                     break
                 end
             end
@@ -393,6 +386,7 @@ function event_midi(b1, b2, b3)
     elseif status == 0xD0 then
         if st.mpe_in then
             for i=1, olafur_count do olafur_pressure[olafur_notes[i]] = b2 end
+            dirty = true
         end
     elseif status == 0xB0 then
         if b2 == 74 and st.mpe_in then
@@ -404,142 +398,100 @@ function event_midi(b1, b2, b3)
 end
 
 -- ============================================================
--- GRID UI & DELTA RENDER
+-- GRID UI & RENDER (EVENT DRIVEN)
 -- ============================================================
-local function clear_buffer()
-    for x = 1, 16 do
-        for y = 1, 8 do g_buf[x][y] = 0 end
-    end
-end
+local function redraw()
+    if not dirty then return end
+    dirty = false
 
-local function flush_grid()
-    local dirty = false
-    for x = 1, 16 do
-        for y = 1, 8 do
-            local val = g_press[x][y] and 15 or g_buf[x][y]
-            if val ~= g_shd[x][y] then
-                grid_led(x, y, val)
-                g_shd[x][y] = val
-                dirty = true
+    grid_led_all(0)
+
+    if st.page == 1 then
+        for i=1, 8 do
+            grid_led(i, 1, v[1].bits[i] == 1 and 12 or 4)
+            grid_led(i, 2, v[2].bits[i] == 1 and 12 or 4)
+        end
+        grid_led(9, 1, v[1].mute and 10 or 2)
+        grid_led(9, 2, v[2].mute and 10 or 2)
+        for i=10, 16 do
+            grid_led(i, 1, (v[1].oct == i-13) and 14 or 4)
+            grid_led(i, 2, (v[2].oct == i-13) and 14 or 4)
+        end
+
+        for i=1, 16 do grid_led(i, 3, 5) end
+
+        for i=1, 16 do
+            grid_led(i, 4, (st.low == i) and 12 or 2)
+            grid_led(i, 5, (st.high == i) and 13 or 3)
+        end
+
+        grid_led(1, 6, st.momentary[1] and 6 or 6)
+        grid_led(2, 6, st.momentary[2] and 6 or 6)
+        grid_led(8, 6, st.olafur_on and (beat_flash and 14 or 8) or 4)
+        for i=9, 11 do grid_led(i, 6, (st.cycle_mode == i-8) and 14 or 5) end
+
+        for i=1, 16 do
+            if snaps[i] then 
+                grid_led(i, 7, (st.active_snap == i) and 15 or 6)
             end
         end
-    end
-    if dirty then grid_refresh() end
-end
 
-local function draw_page_1()
-    for i=1, 8 do
-        g_buf[i][1] = v[1].bits[i] == 1 and 12 or 4
-        g_buf[i][2] = v[2].bits[i] == 1 and 12 or 4
-    end
-    g_buf[9][1] = v[1].mute and 10 or 2
-    g_buf[9][2] = v[2].mute and 10 or 2
-    for i=10, 16 do
-        g_buf[i][1] = (v[1].oct == i-13) and 14 or 4
-        g_buf[i][2] = (v[2].oct == i-13) and 14 or 4
-    end
+        local pulse = beat_flash and 14 or 4
+        for i=1, 3 do grid_led(i, 8, (st.time_div == i) and pulse or 4) end
 
-    for i=1, 16 do g_buf[i][3] = 5 end
-
-    for i=1, 16 do
-        g_buf[i][4] = (st.low == i) and 12 or 2
-        g_buf[i][5] = (st.high == i) and 13 or 3
-    end
-
-    g_buf[1][6] = st.momentary[1] and 6 or 6
-    g_buf[2][6] = st.momentary[2] and 6 or 6
-    g_buf[8][6] = st.olafur_on and lut_sin[(frame_counter % 60) + 1] or 4
-    for i=9, 11 do g_buf[i][6] = (st.cycle_mode == i-8) and 14 or 5 end
-
-    for i=1, 16 do
-        if snaps[i] then 
-            g_buf[i][7] = (st.active_snap == i) and 15 or 6 
-        else 
-            g_buf[i][7] = 0 
+    elseif st.page == 2 then
+        for i=1, 8 do
+            grid_led(i, 1, seed_bin[i] == 1 and 14 or 4)
+            grid_led(i+8, 1, rule_bin[i] == 1 and 10 or 2)
         end
-    end
 
-    local pulse = lut_sin[(frame_counter % 60) + 1]
-    for i=1, 3 do g_buf[i][8] = (st.time_div == i) and pulse or 4 end
-end
-
-local function draw_page_2()
-    for i=1, 8 do
-        g_buf[i][1] = seed_bin[i] == 1 and 14 or 4
-        g_buf[i+8][1] = rule_bin[i] == 1 and 10 or 2
-    end
-
-    for i=1, 16 do
-        g_buf[i][2] = (i <= v[1].gate_prob) and 5 or 0
-        if i == v[1].gate_prob then g_buf[i][2] = 12 end
-        
-        g_buf[i][3] = (i <= v[2].gate_prob) and 5 or 0
-        if i == v[2].gate_prob then g_buf[i][3] = 12 end
-        
-        g_buf[i][4] = (i <= v[1].trans_prob) and 5 or 0
-        if i == v[1].trans_prob then g_buf[i][4] = 12 end
-        
-        g_buf[i][5] = (i <= v[2].trans_prob) and 5 or 0
-        if i == v[2].trans_prob then g_buf[i][5] = 12 end
-    end
-
-    for i=1, 16 do g_buf[i][6] = (st.scale == i) and 14 or 3 end
-
-    if st.olafur_on then
-        for i=1, olafur_count do
-            local x = ((olafur_notes[i] % 12) + 1)
-            g_buf[x][7] = math.floor(5 + (olafur_pressure[olafur_notes[i]] / 127) * 9)
+        for i=1, 16 do
+            grid_led(i, 2, (i == v[1].gate_prob) and 12 or ((i < v[1].gate_prob) and 5 or 0))
+            grid_led(i, 3, (i == v[2].gate_prob) and 12 or ((i < v[2].gate_prob) and 5 or 0))
+            grid_led(i, 4, (i == v[1].trans_prob) and 12 or ((i < v[1].trans_prob) and 5 or 0))
+            grid_led(i, 5, (i == v[2].trans_prob) and 12 or ((i < v[2].trans_prob) and 5 or 0))
         end
-    end
-end
 
-local function draw_page_3()
-    for i=1, 8 do
-        g_buf[i][1] = (i <= st.mpe_vel_amt) and 6 or 0
-        if i == st.mpe_vel_amt then g_buf[i][1] = 12 end
-        
-        g_buf[i+8][1] = (i <= st.mpe_ratchet_amt) and 6 or 0
-        if i == st.mpe_ratchet_amt then g_buf[i+8][1] = 12 end
-    end
+        for i=1, 16 do grid_led(i, 6, (st.scale == i) and 14 or 3) end
 
-    for i=1, 16 do
-        g_buf[i][2] = (i <= st.mpe_timbre_amt) and 6 or 0
-        if i == st.mpe_timbre_amt then g_buf[i][2] = 12 end
-    end
+        if st.olafur_on then
+            for i=1, olafur_count do
+                local x = ((olafur_notes[i] % 12) + 1)
+                grid_led(x, 7, math.floor(5 + (olafur_pressure[olafur_notes[i]] / 127) * 9))
+            end
+        end
 
-    for i=1, 16 do
-        g_buf[i][3] = (st.midi_in_ch == i) and 12 or 3
-        g_buf[i][4] = (st.midi_out_ch == i) and 12 or 3
-    end
+    elseif st.page == 3 then
+        for i=1, 8 do
+            grid_led(i, 1, (i == st.mpe_vel_amt) and 12 or ((i < st.mpe_vel_amt) and 6 or 0))
+            grid_led(i+8, 1, (i == st.mpe_ratchet_amt) and 12 or ((i < st.mpe_ratchet_amt) and 6 or 0))
+        end
 
-    g_buf[1][5] = st.mpe_in and 14 or 4
-    g_buf[2][5] = st.mpe_out and 14 or 4
-    g_buf[4][5] = st.clock_in and 14 or 4
-    g_buf[5][5] = st.clock_out and 14 or 4
+        for i=1, 16 do
+            grid_led(i, 2, (i == st.mpe_timbre_amt) and 12 or ((i < st.mpe_timbre_amt) and 6 or 0))
+        end
 
-    local pulse = lut_sin[(frame_counter % 60) + 1]
-    for i=1, 16 do
-        g_buf[i][6] = (st.bpm_coarse == i) and pulse or 4
-    end
-    for i=1, 10 do
-        g_buf[i][7] = (st.bpm_fine == i-1) and pulse or 3
-    end
-end
+        for i=1, 16 do
+            grid_led(i, 3, (st.midi_in_ch == i) and 12 or 3)
+            grid_led(i, 4, (st.midi_out_ch == i) and 12 or 3)
+        end
 
-local function ui_tick()
-    frame_counter = frame_counter + 1
-    clear_buffer()
+        grid_led(1, 5, st.mpe_in and 14 or 4)
+        grid_led(2, 5, st.mpe_out and 14 or 4)
+        grid_led(4, 5, st.clock_in and 14 or 4)
+        grid_led(5, 5, st.clock_out and 14 or 4)
 
-    if st.page == 1 then draw_page_1()
-    elseif st.page == 2 then draw_page_2()
-    elseif st.page == 3 then draw_page_3()
+        local pulse = beat_flash and 14 or 4
+        for i=1, 16 do grid_led(i, 6, (st.bpm_coarse == i) and pulse or 4) end
+        for i=1, 10 do grid_led(i, 7, (st.bpm_fine == i-1) and pulse or 3) end
     end
 
-    g_buf[14][8] = (st.page == 1) and 14 or 4
-    g_buf[15][8] = (st.page == 2) and 14 or 4
-    g_buf[16][8] = (st.page == 3) and 14 or 4
+    -- Global Nav
+    grid_led(14, 8, (st.page == 1) and 14 or 4)
+    grid_led(15, 8, (st.page == 2) and 14 or 4)
+    grid_led(16, 8, (st.page == 3) and 14 or 4)
 
-    flush_grid()
+    grid_refresh()
 end
 
 -- ============================================================
@@ -547,7 +499,10 @@ end
 -- ============================================================
 function event_grid(x, y, z)
     local is_press = (z == 1)
-    g_press[x][y] = is_press
+    dirty = true
+
+    -- Feedback visual inmediato (Brillo 15)
+    if is_press then grid_led(x, y, 15); grid_refresh() end
 
     if y == 8 and x >= 14 and is_press then
         st.page = x - 13
@@ -586,30 +541,19 @@ function event_grid(x, y, z)
             elseif x >= 9 and x <= 11 then st.cycle_mode = x - 8 end
         elseif y == 7 then
             if is_press then
-                snap_press_time[x] = frame_counter
+                -- Guardamos el tiempo de pulsación (usando os.time o un contador simple)
+                -- Como no tenemos os.time garantizado en iii, usamos un contador de ticks de UI
+                snap_press_time[x] = 0 
             else
-                local dur = frame_counter - snap_press_time[x]
-                if dur > 24 then -- Long press (>800ms at 30fps)
-                    snaps[x] = nil
-                    pset_write(x, nil)
-                    if st.active_snap == x then st.active_snap = 0 end
+                -- Lógica simplificada de Snapshots para evitar timers complejos
+                if snaps[x] == nil then
+                    snaps[x] = pack_state()
+                    pset_write(x, snaps[x])
+                    st.active_snap = x
                 else
-                    if snaps[x] == nil then
-                        snaps[x] = pack_state()
-                        pset_write(x, snaps[x])
-                        st.active_snap = x
-                    else
-                        if frame_counter - snap_last_tap[x] < 9 then -- Double tap (<300ms at 30fps)
-                            snaps[x] = pack_state()
-                            pset_write(x, snaps[x])
-                            st.active_snap = x
-                        else
-                            unpack_state(snaps[x])
-                            st.active_snap = x
-                        end
-                    end
+                    unpack_state(snaps[x])
+                    st.active_snap = x
                 end
-                snap_last_tap[x] = frame_counter
             end
         elseif y == 8 and x <= 3 and is_press then
             st.time_div = x
@@ -664,7 +608,7 @@ for i = 1, 16 do
     if ok and data then snaps[i] = data end
 end
 
-metro_ui = metro.init(ui_tick, 1.0 / FPS)
+metro_ui = metro.init(redraw, 0.015)
 metro_ui:start()
 
 metro_seq = metro.init(seq_tick, 60.0 / (st.bpm * 24))
