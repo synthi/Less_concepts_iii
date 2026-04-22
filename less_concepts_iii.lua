@@ -129,7 +129,7 @@ local metro_ui = nil
 -- ============================================================
 local is_starting = true
 local marquee_pos = 16.0
-local marquee_text = "LESS CONCEPTS III ... INICIANDO "
+local marquee_text = "LESS CONCEPTS iii "
 local font = {
     ["L"]={4,4,4,4,7}, ["E"]={7,4,6,4,7}, ["S"]={3,4,2,1,6}, ["C"]={3,4,4,4,3},["O"]={2,5,5,5,2}, ["N"]={5,7,7,5,5}, ["P"]={6,5,6,4,4}, ["T"]={7,2,2,2,2},
     ["I"]={7,2,2,2,7},["A"]={2,5,7,5,5}, ["D"]={6,5,5,5,6}, ["."]={0,0,0,0,2},
