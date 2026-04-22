@@ -1,4 +1,4 @@
---- less concepts iii (v7.0 - FLAWLESS EDITION)
+--- less concepts iii (v8.0 - THE MASTERPIECE)
 --- Monolithic Standalone Port for iii
 ---
 --- PAGE 1: PERFORMANCE
@@ -34,7 +34,7 @@
 
 
 local FPS = 60
-local PPQN = 24
+local PPQN = 96 -- High Resolution Internal Clock
 local dirty = true
 
 -- Zero-Allocation MIDI Messages
@@ -51,12 +51,13 @@ local scales = {
     {0, 1, 4, 5, 7, 8, 11}, {0, 2, 4, 7, 8}
 }
 
--- 10 Time Divisions (Ticks per step based on 24 PPQN)
-local div_ticks = {96, 48, 24, 16, 12, 8, 6, 4, 3, 2}
+-- 10 Time Divisions based on 96 PPQN
+-- 1/1, 1/2, 1/4, 1/4t, 1/8, 1/8t, 1/16, 1/16t, 1/32, 1/32t
+local div_ticks = {384, 192, 96, 64, 48, 32, 24, 16, 12, 8}
 
 local st = {
     page = 1, seed = 36, rule = 30, low = 1, high = 14, scale = 1,
-    bpm_coarse = 6, bpm_fine = 0, bpm = 120, time_div = 3,
+    bpm_coarse = 7, bpm_fine = 0, bpm = 120, time_div = 3, -- Default 1/4
     olafur_on = false, mpe_in = false, mpe_out = false,
     clock_in = false, clock_out = false, midi_in_ch = 1, midi_out_ch = 1,
     mpe_vel_amt = 8, mpe_ratchet_amt = 4, mpe_timbre_amt = 8, cycle_mode = 0,
@@ -118,22 +119,23 @@ end
 local available_snaps = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}
 
 local tick_counter = 0
-local frame_counter = 0
 local mpe_out_rotator = 2
 local is_playing = true
 local metro_seq = nil
 local metro_ui = nil
+local retime = false
 
 -- ============================================================
 -- STARTUP MARQUEE (EASTER EGG)
 -- ============================================================
 local is_starting = true
 local marquee_pos = 16.0
-local marquee_text = "LESS CONCEPTS iii "
+local marquee_text = "Less concepts iii   "
+-- Custom 3x5 font for specific characters
 local font = {
-    ["L"]={4,4,4,4,7}, ["E"]={7,4,6,4,7}, ["S"]={3,4,2,1,6}, ["C"]={3,4,4,4,3},["O"]={2,5,5,5,2}, ["N"]={5,7,7,5,5}, ["P"]={6,5,6,4,4}, ["T"]={7,2,2,2,2},
-    ["I"]={7,2,2,2,7},["A"]={2,5,7,5,5}, ["D"]={6,5,5,5,6}, ["."]={0,0,0,0,2},
-    [" "]={0,0,0,0,0}
+    ["L"]={4,4,4,4,7},["e"]={2,5,7,4,3}, ["s"]={3,4,2,1,6}, ["c"]={3,4,4,4,3},
+    ["o"]={0,2,5,5,2}, ["n"]={0,6,5,5,5},["p"]={0,6,5,6,4}, ["t"]={2,7,2,2,1},
+    ["i"]={2,0,2,2,2}, [" "]={0,0,0,0,0}
 }
 
 -- ============================================================
@@ -258,7 +260,10 @@ end
 local function pack_state()
     local s = {}
     for k,val in pairs(st) do 
-        if type(val) ~= "table" then s[k] = val end 
+        -- STRICT ISOLATION: Do not save UI or Tempo state in snapshots
+        if type(val) ~= "table" and k ~= "page" and k ~= "active_snap" and k ~= "bpm_coarse" and k ~= "bpm_fine" and k ~= "bpm" then 
+            s[k] = val 
+        end 
     end
     s.v1_bits = {table.unpack(v[1].bits)}
     s.v2_bits = {table.unpack(v[2].bits)}
@@ -271,7 +276,7 @@ end
 local function unpack_state(s)
     if not s then return end
     for k,val in pairs(s) do 
-        if st[k] ~= nil and type(st[k]) ~= "table" and k ~= "bpm_coarse" and k ~= "bpm_fine" and k ~= "bpm" then 
+        if st[k] ~= nil and type(st[k]) ~= "table" and k ~= "page" and k ~= "active_snap" and k ~= "bpm_coarse" and k ~= "bpm_fine" and k ~= "bpm" then 
             st[k] = val 
         end 
     end
@@ -335,12 +340,21 @@ local function cycle_snapshots()
 end
 
 -- ============================================================
--- TIME ENGINE (ZERO JITTER)
+-- TIME ENGINE (96 PPQN - ZERO JITTER)
 -- ============================================================
 local function seq_tick()
+    -- Retime logic (from 'wake') to prevent phase reset jitter
+    if retime and not st.clock_in then
+        if metro_seq then metro_seq:start(60.0 / (st.bpm * 96)) end
+        retime = false
+    end
+
     if not is_playing then return end
 
-    if st.clock_out then midi_out(msg_clock) end
+    -- MIDI Clock Out (24 PPQN -> Send every 4 internal ticks)
+    if st.clock_out and tick_counter % 4 == 0 then 
+        midi_out(msg_clock) 
+    end
 
     local ticks = div_ticks[st.time_div]
     local mod_tick = tick_counter % ticks
@@ -357,7 +371,8 @@ local function seq_tick()
         trigger_voice(1)
         trigger_voice(2)
         
-        if tick_counter == 0 then cycle_snapshots() end
+        -- Cycle snapshots every 384 ticks (1 bar of 4/4)
+        if tick_counter % 384 == 0 then cycle_snapshots() end
     else
         if st.mpe_ratchet_amt > 1 then
             for voice_idx = 1, 2 do
@@ -383,16 +398,15 @@ local function seq_tick()
         end
     end
 
-    tick_counter = (tick_counter + 1) % 96
+    -- 384 is the Least Common Multiple of all div_ticks. Perfect wrap-around.
+    tick_counter = (tick_counter + 1) % 384
 end
 
 local function update_tempo()
-    local new_bpm = 60 + (st.bpm_coarse * 10) + st.bpm_fine
+    local new_bpm = 50 + (st.bpm_coarse * 10) + st.bpm_fine
     if new_bpm ~= st.bpm then
         st.bpm = new_bpm
-        if not st.clock_in and metro_seq then
-            metro_seq.time = 60.0 / (st.bpm * 24)
-        end
+        retime = true
     end
     dirty = true
 end
@@ -515,7 +529,7 @@ local function draw_marquee()
             local f = font[char] or font[" "]
             for y = 1, 5 do
                 local bit = (f[y] >> (2 - col)) & 1
-                g_buf[x][y + 1] = bit == 1 and 15 or 0
+                g_buf[x][y + 1] = bit == 1 and 7 or 0 -- Brightness 7 as requested
             end
         end
     end
@@ -557,9 +571,9 @@ local function draw_page_1()
             local ticks = div_ticks[i]
             local pulse_off = math.max(1, math.floor(ticks / 2))
             if tick_counter % ticks < pulse_off then
-                pulse_val = 15
+                pulse_val = 9 -- Base (4) + 5
             else
-                pulse_val = 8
+                pulse_val = 4
             end
         end
         g_buf[i][8] = pulse_val
@@ -607,22 +621,21 @@ local function draw_page_3()
     end
 
     g_buf[1][5] = st.mpe_in and 14 or 2
-    g_buf[2][5] = st.mpe_out and 14 or 2
-    g_buf[4][5] = st.clock_in and 14 or 3
-    g_buf[5][5] = st.clock_out and 14 or 3
+    g_buf[2][5] = st.mpe_out and 14 or 3
+    g_buf[4][5] = st.clock_in and 14 or 4
+    g_buf[5][5] = st.clock_out and 14 or 5
 
-    local pulse = (tick_counter % 24 < 6) and 14 or 4
+    local pulse = (tick_counter % 24 < 12) and 14 or 4
     for i=1, 16 do g_buf[i][6] = (st.bpm_coarse == i) and pulse or 4 end
     for i=1, 10 do g_buf[i][7] = (st.bpm_fine == i-1) and pulse or 3 end
 end
 
 local function ui_tick()
-    frame_counter = frame_counter + 1
-    
     if is_starting then
         marquee_pos = marquee_pos - 0.4
         if marquee_pos < -(#marquee_text * 4) then
             is_starting = false
+            dirty = true
         end
         clear_buffer()
         draw_marquee()
@@ -647,10 +660,10 @@ local function ui_tick()
 end
 
 -- ============================================================
--- GRID INPUT
+-- GRID INPUT (ZERO JITTER)
 -- ============================================================
 function event_grid(x, y, z)
-    if is_starting then return end -- Block input during startup
+    if is_starting then return end
     
     local is_press = (z == 1)
     g_press[x][y] = is_press
@@ -692,10 +705,11 @@ function event_grid(x, y, z)
             if x >= 9 and x <= 11 then st.cycle_mode = x - 8 end
         elseif y == 7 then
             if is_press then
-                snap_press_time[x] = frame_counter
+                -- Use internal tick counter as a safe timer
+                snap_press_time[x] = tick_counter
             else
-                local dur = frame_counter - snap_press_time[x]
-                if dur > 48 then -- Long press (>800ms at 60fps)
+                local dur = (tick_counter - snap_press_time[x]) % 384
+                if dur > 96 then -- Long press (> 1 beat)
                     snaps[x] = nil
                     if st.active_snap == x then st.active_snap = 0 end
                     save_all()
@@ -705,7 +719,7 @@ function event_grid(x, y, z)
                         st.active_snap = x
                         save_all()
                     else
-                        if frame_counter - snap_last_tap[x] < 18 then -- Double tap (<300ms)
+                        if dur < 24 then -- Double tap logic simplified to quick tap
                             snaps[x] = pack_state()
                             st.active_snap = x
                             save_all()
@@ -715,7 +729,6 @@ function event_grid(x, y, z)
                         end
                     end
                 end
-                snap_last_tap[x] = frame_counter
             end
         elseif y == 8 and is_press then
             if x <= 10 then st.time_div = x
@@ -773,5 +786,5 @@ load_all()
 metro_ui = metro.init(ui_tick, 1.0 / FPS)
 metro_ui:start()
 
-metro_seq = metro.init(seq_tick, 60.0 / (st.bpm * 24))
+metro_seq = metro.init(seq_tick, 60.0 / (st.bpm * 96))
 if not st.clock_in then metro_seq:start() end
