@@ -1,4 +1,4 @@
---- less concepts iii (v8.0 - THE MASTERPIECE)
+--- less concepts iii (v8.0 - FLAWLESS EDITION)
 --- Monolithic Standalone Port for iii
 ---
 --- PAGE 1: PERFORMANCE
@@ -32,10 +32,8 @@
 --- R8: Page Nav (14-16)
 
 
-
-local FPS = 60
-local PPQN = 96 -- High Resolution Internal Clock
 local dirty = true
+local flash_x, flash_y, flash_frames = 0, 0, 0
 
 -- Zero-Allocation MIDI Messages
 local msg_clock = {0xF8}
@@ -51,13 +49,13 @@ local scales = {
     {0, 1, 4, 5, 7, 8, 11}, {0, 2, 4, 7, 8}
 }
 
--- 10 Time Divisions based on 96 PPQN
+-- 10 Time Divisions (Ticks per step based on 24 PPQN)
 -- 1/1, 1/2, 1/4, 1/4t, 1/8, 1/8t, 1/16, 1/16t, 1/32, 1/32t
-local div_ticks = {384, 192, 96, 64, 48, 32, 24, 16, 12, 8}
+local div_ticks = {96, 48, 24, 16, 12, 8, 6, 4, 3, 2}
 
 local st = {
     page = 1, seed = 36, rule = 30, low = 1, high = 14, scale = 1,
-    bpm_coarse = 7, bpm_fine = 0, bpm = 120, time_div = 3, -- Default 1/4
+    bpm_coarse = 6, bpm_fine = 0, bpm = 120, time_div = 3,
     olafur_on = false, mpe_in = false, mpe_out = false,
     clock_in = false, clock_out = false, midi_in_ch = 1, midi_out_ch = 1,
     mpe_vel_amt = 8, mpe_ratchet_amt = 4, mpe_timbre_amt = 8, cycle_mode = 0,
@@ -94,20 +92,6 @@ end
 local global_cc1 = 64
 local global_cc2 = 64
 
-local g_buf = {}
-local g_shd = {}
-local g_press = {}
-for x = 1, 16 do
-    g_buf[x] = {}
-    g_shd[x] = {}
-    g_press[x] = {}
-    for y = 1, 8 do
-        g_buf[x][y] = 0
-        g_shd[x][y] = -1
-        g_press[x][y] = false
-    end
-end
-
 local snaps = {}
 local snap_press_time = {}
 local snap_last_tap = {}
@@ -131,7 +115,6 @@ local retime = false
 local is_starting = true
 local marquee_pos = 16.0
 local marquee_text = "Less concepts iii   "
--- Custom 3x5 font for specific characters
 local font = {
     ["L"]={4,4,4,4,7},["e"]={2,5,7,4,3}, ["s"]={3,4,2,1,6}, ["c"]={3,4,4,4,3},
     ["o"]={0,2,5,5,2}, ["n"]={0,6,5,5,5},["p"]={0,6,5,6,4}, ["t"]={2,7,2,2,1},
@@ -201,7 +184,8 @@ local function trigger_voice(voice_idx)
     local cc74 = global_cc2
 
     if st.olafur_on then
-        if olafur_count == 0 then return end
+        if olafur_count == 0 then return end -- SILENCE IF NO NOTES HELD
+        
         local scaled_idx = math.floor((st.seed / 256) * olafur_count) + 1
         scaled_idx = math.max(1, math.min(olafur_count, scaled_idx))
         note_val = olafur_notes[scaled_idx]
@@ -340,21 +324,17 @@ local function cycle_snapshots()
 end
 
 -- ============================================================
--- TIME ENGINE (96 PPQN - ZERO JITTER)
+-- TIME ENGINE (24 PPQN - ZERO JITTER)
 -- ============================================================
 local function seq_tick()
-    -- Retime logic (from 'wake') to prevent phase reset jitter
     if retime and not st.clock_in then
-        if metro_seq then metro_seq:start(60.0 / (st.bpm * 96)) end
+        if metro_seq then metro_seq:start(60.0 / (st.bpm * 24)) end
         retime = false
     end
 
     if not is_playing then return end
 
-    -- MIDI Clock Out (24 PPQN -> Send every 4 internal ticks)
-    if st.clock_out and tick_counter % 4 == 0 then 
-        midi_out(msg_clock) 
-    end
+    if st.clock_out then midi_out(msg_clock) end
 
     local ticks = div_ticks[st.time_div]
     local mod_tick = tick_counter % ticks
@@ -371,8 +351,7 @@ local function seq_tick()
         trigger_voice(1)
         trigger_voice(2)
         
-        -- Cycle snapshots every 384 ticks (1 bar of 4/4)
-        if tick_counter % 384 == 0 then cycle_snapshots() end
+        if tick_counter == 0 then cycle_snapshots() end
     else
         if st.mpe_ratchet_amt > 1 then
             for voice_idx = 1, 2 do
@@ -398,8 +377,7 @@ local function seq_tick()
         end
     end
 
-    -- 384 is the Least Common Multiple of all div_ticks. Perfect wrap-around.
-    tick_counter = (tick_counter + 1) % 384
+    tick_counter = (tick_counter + 1) % 96
 end
 
 local function update_tempo()
@@ -412,26 +390,23 @@ local function update_tempo()
 end
 
 -- ============================================================
--- MIDI IN CALLBACK (TRUE OLAFUR + SUSTAIN)
+-- MIDI IN CALLBACK (CRASH-PROOF)
 -- ============================================================
 function event_midi(b1, b2, b3)
-    local status = b1 & 0xF0
-    local ch = (b1 & 0x0F) + 1
-
-    if status == 0xF8 and st.clock_in then
-        seq_tick()
-        return
-    elseif status == 0xFA and st.clock_in then
-        is_playing = true
-        tick_counter = 0
-        return
-    elseif status == 0xFC and st.clock_in then
-        is_playing = false
-        notes_off(1)
-        notes_off(2)
-        dirty = true
+    if not b1 then return end
+    
+    -- System Real-Time Messages (No channel, 1 byte)
+    if b1 >= 0xF8 then
+        if b1 == 0xF8 and st.clock_in then seq_tick(); return end
+        if b1 == 0xFA and st.clock_in then is_playing = true; tick_counter = 0; return end
+        if b1 == 0xFC and st.clock_in then is_playing = false; notes_off(1); notes_off(2); dirty = true; return end
         return
     end
+
+    local status = b1 & 0xF0
+    local ch = (b1 & 0x0F) + 1
+    b2 = b2 or 0
+    b3 = b3 or 0
 
     if not st.mpe_in and ch ~= st.midi_in_ch then return end
 
@@ -497,137 +472,127 @@ function event_midi(b1, b2, b3)
 end
 
 -- ============================================================
--- GRID UI & DELTA RENDER
+-- GRID UI & RENDER (THE TEHN METHOD)
 -- ============================================================
-local function clear_buffer()
-    for x = 1, 16 do
-        for y = 1, 8 do g_buf[x][y] = 0 end
-    end
-end
+local function redraw()
+    if not dirty then return end
+    dirty = false
+    grid_led_all(0)
 
-local function flush_grid()
-    local is_dirty = false
-    for x = 1, 16 do
-        for y = 1, 8 do
-            local val = g_press[x][y] and 15 or g_buf[x][y]
-            if val ~= g_shd[x][y] then
-                grid_led(x, y, val)
-                g_shd[x][y] = val
-                is_dirty = true
+    if is_starting then
+        for x = 1, 16 do
+            local char_idx = math.floor((x - marquee_pos) / 4) + 1
+            local col = math.floor(x - marquee_pos) % 4
+            if char_idx > 0 and char_idx <= #marquee_text and col < 3 then
+                local char = marquee_text:sub(char_idx, char_idx)
+                local f = font[char] or font[" "]
+                for y = 1, 5 do
+                    local bit = (f[y] >> (2 - col)) & 1
+                    if bit == 1 then grid_led(x, y + 1, 7) end
+                end
             end
         end
+        grid_refresh()
+        return
     end
-    if is_dirty then grid_refresh() end
-end
 
-local function draw_marquee()
-    for x = 1, 16 do
-        local char_idx = math.floor((x - marquee_pos) / 4) + 1
-        local col = math.floor(x - marquee_pos) % 4
-        if char_idx > 0 and char_idx <= #marquee_text and col < 3 then
-            local char = marquee_text:sub(char_idx, char_idx)
-            local f = font[char] or font[" "]
-            for y = 1, 5 do
-                local bit = (f[y] >> (2 - col)) & 1
-                g_buf[x][y + 1] = bit == 1 and 7 or 0 -- Brightness 7 as requested
+    if st.page == 1 then
+        for i=1, 8 do
+            grid_led(i, 1, v[1].bits[i] == 1 and 12 or 4)
+            grid_led(i, 2, v[2].bits[i] == 1 and 12 or 4)
+        end
+        grid_led(9, 1, v[1].mute and 10 or 2)
+        grid_led(9, 2, v[2].mute and 10 or 2)
+        for i=10, 16 do
+            grid_led(i, 1, (v[1].oct == i-13) and 14 or 4)
+            grid_led(i, 2, (v[2].oct == i-13) and 14 or 4)
+        end
+
+        for i=1, 16 do grid_led(i, 3, 2) end
+
+        for i=1, 16 do
+            grid_led(i, 4, (st.low == i) and 12 or 2)
+            grid_led(i, 5, (st.high == i) and 13 or 3)
+        end
+
+        for i=9, 11 do grid_led(i, 6, (st.cycle_mode == i-8) and 14 or 5) end
+
+        for i=1, 16 do
+            if snaps[i] then grid_led(i, 7, (st.active_snap == i) and 15 or 6) end
+        end
+
+        for i=1, 10 do
+            local is_selected = (st.time_div == i)
+            local pulse_val = 4
+            if is_selected then
+                local ticks = div_ticks[i]
+                local pulse_off = math.max(1, math.floor(ticks / 2))
+                if tick_counter % ticks < pulse_off then pulse_val = 7 else pulse_val = 2 end
+            end
+            grid_led(i, 8, pulse_val)
+        end
+        grid_led(12, 8, st.olafur_on and 15 or 1)
+
+    elseif st.page == 2 then
+        for i=1, 8 do
+            grid_led(i, 1, seed_bin[i] == 1 and 14 or 4)
+            grid_led(i+8, 1, rule_bin[i] == 1 and 10 or 2)
+        end
+
+        for i=1, 16 do
+            grid_led(i, 2, (i == v[1].gate_prob) and 12 or ((i < v[1].gate_prob) and 5 or 0))
+            grid_led(i, 3, (i == v[2].gate_prob) and 12 or ((i < v[2].gate_prob) and 5 or 0))
+            grid_led(i, 4, (i == v[1].trans_prob) and 12 or ((i < v[1].trans_prob) and 5 or 0))
+            grid_led(i, 5, (i == v[2].trans_prob) and 12 or ((i < v[2].trans_prob) and 5 or 0))
+        end
+
+        for i=1, 16 do grid_led(i, 6, (st.scale == i) and 14 or 3) end
+
+        if st.olafur_on then
+            for i=1, olafur_count do
+                local x = ((olafur_notes[i] % 12) + 1)
+                grid_led(x, 7, math.floor(5 + (olafur_pressure[olafur_notes[i]] / 127) * 9))
             end
         end
-    end
-end
 
-local function draw_page_1()
-    for i=1, 8 do
-        g_buf[i][1] = v[1].bits[i] == 1 and 12 or 4
-        g_buf[i][2] = v[2].bits[i] == 1 and 12 or 4
-    end
-    g_buf[9][1] = v[1].mute and 10 or 2
-    g_buf[9][2] = v[2].mute and 10 or 2
-    for i=10, 16 do
-        g_buf[i][1] = (v[1].oct == i-13) and 14 or 4
-        g_buf[i][2] = (v[2].oct == i-13) and 14 or 4
-    end
-
-    for i=1, 16 do g_buf[i][3] = 2 end
-
-    for i=1, 16 do
-        g_buf[i][4] = (st.low == i) and 12 or 2
-        g_buf[i][5] = (st.high == i) and 13 or 3
-    end
-
-    for i=9, 11 do g_buf[i][6] = (st.cycle_mode == i-8) and 14 or 5 end
-
-    for i=1, 16 do
-        if snaps[i] then 
-            g_buf[i][7] = (st.active_snap == i) and 15 or 6 
-        else 
-            g_buf[i][7] = 0 
+    elseif st.page == 3 then
+        for i=1, 8 do
+            grid_led(i, 1, (i == st.mpe_vel_amt) and 12 or ((i < st.mpe_vel_amt) and 6 or 0))
+            grid_led(i+8, 1, (i == st.mpe_ratchet_amt) and 12 or ((i < st.mpe_ratchet_amt) and 6 or 0))
         end
-    end
 
-    for i=1, 10 do
-        local is_selected = (st.time_div == i)
-        local pulse_val = 4
-        if is_selected then
-            local ticks = div_ticks[i]
-            local pulse_off = math.max(1, math.floor(ticks / 2))
-            if tick_counter % ticks < pulse_off then
-                pulse_val = 9 -- Base (4) + 5
-            else
-                pulse_val = 4
-            end
+        for i=1, 16 do
+            grid_led(i, 2, (i == st.mpe_timbre_amt) and 12 or ((i < st.mpe_timbre_amt) and 6 or 0))
         end
-        g_buf[i][8] = pulse_val
-    end
-    
-    g_buf[12][8] = st.olafur_on and 15 or 1
-end
 
-local function draw_page_2()
-    for i=1, 8 do
-        g_buf[i][1] = seed_bin[i] == 1 and 14 or 4
-        g_buf[i+8][1] = rule_bin[i] == 1 and 10 or 2
-    end
-
-    for i=1, 16 do
-        g_buf[i][2] = (i == v[1].gate_prob) and 12 or ((i < v[1].gate_prob) and 5 or 0)
-        g_buf[i][3] = (i == v[2].gate_prob) and 12 or ((i < v[2].gate_prob) and 5 or 0)
-        g_buf[i][4] = (i == v[1].trans_prob) and 12 or ((i < v[1].trans_prob) and 5 or 0)
-        g_buf[i][5] = (i == v[2].trans_prob) and 12 or ((i < v[2].trans_prob) and 5 or 0)
-    end
-
-    for i=1, 16 do g_buf[i][6] = (st.scale == i) and 14 or 3 end
-
-    if st.olafur_on then
-        for i=1, olafur_count do
-            local x = ((olafur_notes[i] % 12) + 1)
-            g_buf[x][7] = math.floor(5 + (olafur_pressure[olafur_notes[i]] / 127) * 9)
+        for i=1, 16 do
+            grid_led(i, 3, (st.midi_in_ch == i) and 12 or 3)
+            grid_led(i, 4, (st.midi_out_ch == i) and 12 or 3)
         end
-    end
-end
 
-local function draw_page_3()
-    for i=1, 8 do
-        g_buf[i][1] = (i == st.mpe_vel_amt) and 12 or ((i < st.mpe_vel_amt) and 6 or 0)
-        g_buf[i+8][1] = (i == st.mpe_ratchet_amt) and 12 or ((i < st.mpe_ratchet_amt) and 6 or 0)
-    end
+        grid_led(1, 5, st.mpe_in and 15 or 2)
+        grid_led(2, 5, st.mpe_out and 15 or 2)
+        grid_led(4, 5, st.clock_in and 15 or 4)
+        grid_led(5, 5, st.clock_out and 15 or 4)
 
-    for i=1, 16 do
-        g_buf[i][2] = (i == st.mpe_timbre_amt) and 12 or ((i < st.mpe_timbre_amt) and 6 or 0)
+        local pulse = (tick_counter % 24 < 12) and 14 or 4
+        for i=1, 16 do grid_led(i, 6, (st.bpm_coarse == i) and pulse or 4) end
+        for i=1, 10 do grid_led(i, 7, (st.bpm_fine == i-1) and pulse or 3) end
     end
 
-    for i=1, 16 do
-        g_buf[i][3] = (st.midi_in_ch == i) and 12 or 3
-        g_buf[i][4] = (st.midi_out_ch == i) and 12 or 3
+    -- Global Nav
+    grid_led(14, 8, (st.page == 1) and 15 or 4)
+    grid_led(15, 8, (st.page == 2) and 15 or 4)
+    grid_led(16, 8, (st.page == 3) and 15 or 4)
+
+    -- Instant Flash for button presses
+    if flash_frames > 0 then
+        grid_led(flash_x, flash_y, 15)
+        flash_frames = flash_frames - 1
+        if flash_frames > 0 then dirty = true end
     end
 
-    g_buf[1][5] = st.mpe_in and 14 or 2
-    g_buf[2][5] = st.mpe_out and 14 or 3
-    g_buf[4][5] = st.clock_in and 14 or 4
-    g_buf[5][5] = st.clock_out and 14 or 5
-
-    local pulse = (tick_counter % 24 < 12) and 14 or 4
-    for i=1, 16 do g_buf[i][6] = (st.bpm_coarse == i) and pulse or 4 end
-    for i=1, 10 do g_buf[i][7] = (st.bpm_fine == i-1) and pulse or 3 end
+    grid_refresh()
 end
 
 local function ui_tick()
@@ -635,28 +600,10 @@ local function ui_tick()
         marquee_pos = marquee_pos - 0.4
         if marquee_pos < -(#marquee_text * 4) then
             is_starting = false
-            dirty = true
         end
-        clear_buffer()
-        draw_marquee()
-        flush_grid()
-        return
+        dirty = true
     end
-
-    if not dirty then return end
-    dirty = false
-    clear_buffer()
-
-    if st.page == 1 then draw_page_1()
-    elseif st.page == 2 then draw_page_2()
-    elseif st.page == 3 then draw_page_3()
-    end
-
-    g_buf[14][8] = (st.page == 1) and 14 or 4
-    g_buf[15][8] = (st.page == 2) and 14 or 4
-    g_buf[16][8] = (st.page == 3) and 14 or 4
-
-    flush_grid()
+    redraw()
 end
 
 -- ============================================================
@@ -666,8 +613,12 @@ function event_grid(x, y, z)
     if is_starting then return end
     
     local is_press = (z == 1)
-    g_press[x][y] = is_press
-    dirty = true
+    if is_press then
+        flash_x = x
+        flash_y = y
+        flash_frames = 3
+        dirty = true
+    end
 
     if y == 8 and x >= 14 and is_press then
         st.page = x - 13
@@ -705,11 +656,10 @@ function event_grid(x, y, z)
             if x >= 9 and x <= 11 then st.cycle_mode = x - 8 end
         elseif y == 7 then
             if is_press then
-                -- Use internal tick counter as a safe timer
                 snap_press_time[x] = tick_counter
             else
                 local dur = (tick_counter - snap_press_time[x]) % 384
-                if dur > 96 then -- Long press (> 1 beat)
+                if dur > 96 then 
                     snaps[x] = nil
                     if st.active_snap == x then st.active_snap = 0 end
                     save_all()
@@ -719,7 +669,7 @@ function event_grid(x, y, z)
                         st.active_snap = x
                         save_all()
                     else
-                        if dur < 24 then -- Double tap logic simplified to quick tap
+                        if dur < 24 then 
                             snaps[x] = pack_state()
                             st.active_snap = x
                             save_all()
@@ -786,5 +736,5 @@ load_all()
 metro_ui = metro.init(ui_tick, 1.0 / FPS)
 metro_ui:start()
 
-metro_seq = metro.init(seq_tick, 60.0 / (st.bpm * 96))
+metro_seq = metro.init(seq_tick, 60.0 / (st.bpm * 24))
 if not st.clock_in then metro_seq:start() end
