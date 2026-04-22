@@ -1,4 +1,4 @@
---- less concepts iii (v6.2 - TRUE OLAFUR, SUSTAIN & ZERO JITTER)
+--- less concepts iii (v7.0 - FLAWLESS EDITION)
 --- Monolithic Standalone Port for iii
 ---
 --- PAGE 1: PERFORMANCE
@@ -32,6 +32,9 @@
 --- R8: Page Nav (14-16)
 
 
+
+local FPS = 60
+local PPQN = 24
 local dirty = true
 
 -- Zero-Allocation MIDI Messages
@@ -49,12 +52,11 @@ local scales = {
 }
 
 -- 10 Time Divisions (Ticks per step based on 24 PPQN)
--- 1/1, 1/2, 1/4, 1/4t, 1/8, 1/8t, 1/16, 1/16t, 1/32, 1/32t
 local div_ticks = {96, 48, 24, 16, 12, 8, 6, 4, 3, 2}
 
 local st = {
     page = 1, seed = 36, rule = 30, low = 1, high = 14, scale = 1,
-    bpm_coarse = 6, bpm_fine = 0, bpm = 120, time_div = 3, -- Default 1/4
+    bpm_coarse = 6, bpm_fine = 0, bpm = 120, time_div = 3,
     olafur_on = false, mpe_in = false, mpe_out = false,
     clock_in = false, clock_out = false, midi_in_ch = 1, midi_out_ch = 1,
     mpe_vel_amt = 8, mpe_ratchet_amt = 4, mpe_timbre_amt = 8, cycle_mode = 0,
@@ -73,9 +75,9 @@ end
 local seed_bin = {0,0,0,0,0,0,0,0}
 local rule_bin = {0,0,0,0,0,0,0,0}
 
--- True Olafur System (Dynamic Pool + Sustain)
+-- True Olafur System
 local olafur_notes = {}
-local olafur_held = {} -- Tracks if the key is physically pressed
+local olafur_held = {}
 local olafur_count = 0
 local sustain_on = false
 
@@ -121,6 +123,18 @@ local mpe_out_rotator = 2
 local is_playing = true
 local metro_seq = nil
 local metro_ui = nil
+
+-- ============================================================
+-- STARTUP MARQUEE (EASTER EGG)
+-- ============================================================
+local is_starting = true
+local marquee_pos = 16.0
+local marquee_text = "LESS CONCEPTS III ... INICIANDO "
+local font = {
+    ["L"]={4,4,4,4,7}, ["E"]={7,4,6,4,7}, ["S"]={3,4,2,1,6}, ["C"]={3,4,4,4,3},["O"]={2,5,5,5,2}, ["N"]={5,7,7,5,5}, ["P"]={6,5,6,4,4}, ["T"]={7,2,2,2,2},
+    ["I"]={7,2,2,2,7},["A"]={2,5,7,5,5}, ["D"]={6,5,5,5,6}, ["."]={0,0,0,0,2},
+    [" "]={0,0,0,0,0}
+}
 
 -- ============================================================
 -- MATH & CELLULAR AUTOMATA
@@ -185,12 +199,10 @@ local function trigger_voice(voice_idx)
     local cc74 = global_cc2
 
     if st.olafur_on then
-        if olafur_count == 0 then return end -- SILENCE IF NO NOTES HELD
-        
+        if olafur_count == 0 then return end
         local scaled_idx = math.floor((st.seed / 256) * olafur_count) + 1
         scaled_idx = math.max(1, math.min(olafur_count, scaled_idx))
         note_val = olafur_notes[scaled_idx]
-        
         if st.mpe_in then
             pressure = olafur_pressure[note_val]
             cc74 = olafur_cc74[note_val]
@@ -307,13 +319,13 @@ local function cycle_snapshots()
     end
 
     local next_idx = current_idx
-    if st.cycle_mode == 1 then -- < (Prev)
+    if st.cycle_mode == 1 then
         next_idx = current_idx - 1
         if next_idx < 1 then next_idx = count end
-    elseif st.cycle_mode == 2 then -- > (Next)
+    elseif st.cycle_mode == 2 then
         next_idx = current_idx + 1
         if next_idx > count then next_idx = 1 end
-    elseif st.cycle_mode == 3 then -- ~ (Random)
+    elseif st.cycle_mode == 3 then
         next_idx = math.random(1, count)
     end
 
@@ -333,7 +345,7 @@ local function seq_tick()
     local ticks = div_ticks[st.time_div]
     local mod_tick = tick_counter % ticks
 
-    local pulse_off_tick = math.max(1, math.floor(ticks / 4))
+    local pulse_off_tick = math.max(1, math.floor(ticks / 2))
     if mod_tick == 0 or mod_tick == pulse_off_tick then
         dirty = true
     end
@@ -432,7 +444,6 @@ function event_midi(b1, b2, b3)
                 if olafur_notes[i] == b2 then
                     olafur_held[i] = false
                     if not sustain_on then
-                        -- Swap and Pop (Zero-Allocation)
                         olafur_notes[i] = olafur_notes[olafur_count]
                         olafur_held[i] = olafur_held[olafur_count]
                         olafur_count = olafur_count - 1
@@ -448,10 +459,9 @@ function event_midi(b1, b2, b3)
             dirty = true
         end
     elseif status == 0xB0 then
-        if b2 == 64 then -- Sustain Pedal
+        if b2 == 64 then
             sustain_on = (b3 >= 64)
             if not sustain_on and st.olafur_on then
-                -- Remove all unheld notes
                 local i = 1
                 while i <= olafur_count do
                     if not olafur_held[i] then
@@ -496,6 +506,21 @@ local function flush_grid()
     if is_dirty then grid_refresh() end
 end
 
+local function draw_marquee()
+    for x = 1, 16 do
+        local char_idx = math.floor((x - marquee_pos) / 4) + 1
+        local col = math.floor(x - marquee_pos) % 4
+        if char_idx > 0 and char_idx <= #marquee_text and col < 3 then
+            local char = marquee_text:sub(char_idx, char_idx)
+            local f = font[char] or font[" "]
+            for y = 1, 5 do
+                local bit = (f[y] >> (2 - col)) & 1
+                g_buf[x][y + 1] = bit == 1 and 15 or 0
+            end
+        end
+    end
+end
+
 local function draw_page_1()
     for i=1, 8 do
         g_buf[i][1] = v[1].bits[i] == 1 and 12 or 4
@@ -530,7 +555,7 @@ local function draw_page_1()
         local pulse_val = 4
         if is_selected then
             local ticks = div_ticks[i]
-            local pulse_off = math.max(1, math.floor(ticks / 4))
+            local pulse_off = math.max(1, math.floor(ticks / 2))
             if tick_counter % ticks < pulse_off then
                 pulse_val = 15
             else
@@ -592,9 +617,21 @@ local function draw_page_3()
 end
 
 local function ui_tick()
+    frame_counter = frame_counter + 1
+    
+    if is_starting then
+        marquee_pos = marquee_pos - 0.4
+        if marquee_pos < -(#marquee_text * 4) then
+            is_starting = false
+        end
+        clear_buffer()
+        draw_marquee()
+        flush_grid()
+        return
+    end
+
     if not dirty then return end
     dirty = false
-    frame_counter = frame_counter + 1
     clear_buffer()
 
     if st.page == 1 then draw_page_1()
@@ -613,11 +650,11 @@ end
 -- GRID INPUT
 -- ============================================================
 function event_grid(x, y, z)
+    if is_starting then return end -- Block input during startup
+    
     local is_press = (z == 1)
     g_press[x][y] = is_press
     dirty = true
-
-    if is_press then grid_led(x, y, 15); grid_refresh() end
 
     if y == 8 and x >= 14 and is_press then
         st.page = x - 13
@@ -658,7 +695,7 @@ function event_grid(x, y, z)
                 snap_press_time[x] = frame_counter
             else
                 local dur = frame_counter - snap_press_time[x]
-                if dur > 24 then 
+                if dur > 48 then -- Long press (>800ms at 60fps)
                     snaps[x] = nil
                     if st.active_snap == x then st.active_snap = 0 end
                     save_all()
@@ -668,7 +705,7 @@ function event_grid(x, y, z)
                         st.active_snap = x
                         save_all()
                     else
-                        if frame_counter - snap_last_tap[x] < 9 then 
+                        if frame_counter - snap_last_tap[x] < 18 then -- Double tap (<300ms)
                             snaps[x] = pack_state()
                             st.active_snap = x
                             save_all()
@@ -733,7 +770,7 @@ end
 update_binaries()
 load_all()
 
-metro_ui = metro.init(ui_tick, 0.033)
+metro_ui = metro.init(ui_tick, 1.0 / FPS)
 metro_ui:start()
 
 metro_seq = metro.init(seq_tick, 60.0 / (st.bpm * 24))
