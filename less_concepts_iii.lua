@@ -1,4 +1,4 @@
---- less concepts iii (v4.1 - AUDITED MPE Edition)
+--- less concepts iii (v4.2- AUDITED MPE Edition)
 --- Monolithic Standalone Port for iii
 ---
 --- PAGE 1: PERFORMANCE
@@ -56,7 +56,7 @@ local st = {
     olafur_on = false, mpe_in = false, mpe_out = false,
     clock_in = false, clock_out = false, midi_in_ch = 1, midi_out_ch = 1,
     mpe_vel_amt = 8, mpe_ratchet_amt = 4, mpe_timbre_amt = 8, cycle_mode = 0,
-    momentary = {false, false} -- Will not be saved in snapshots
+    momentary = {false, false}
 }
 
 local v = {
@@ -115,7 +115,7 @@ local metro_seq = nil
 local metro_ui = nil
 
 -- ============================================================
--- MATH & CELLULAR AUTOMATA (PATCHED)
+-- MATH & CELLULAR AUTOMATA
 -- ============================================================
 local function update_binaries()
     for i = 0, 7 do
@@ -127,7 +127,6 @@ end
 local function bang()
     local next_seed = 0
     for i = 0, 7 do
-        -- Corrected bitwise neighborhood mapping
         local left_bit = seed_bin[8 - ((i + 1) % 8)]
         local center_bit = seed_bin[8 - i]
         local right_bit = seed_bin[8 - ((i - 1 + 8) % 8)]
@@ -140,7 +139,7 @@ local function bang()
 end
 
 -- ============================================================
--- MIDI & MPE ENGINE (PATCHED)
+-- MIDI & MPE ENGINE
 -- ============================================================
 local function get_next_mpe_ch()
     local ch = mpe_out_rotator
@@ -208,12 +207,17 @@ local function trigger_voice(voice_idx)
     local out_ch = st.midi_out_ch
     if st.mpe_out then
         out_ch = get_next_mpe_ch()
-        -- CC74 logic omitted to strictly adhere to authorized iii API (midi_note_on)
+        if st.mpe_timbre_amt > 1 then
+            -- Generative Timbre based on Cellular Automata Seed
+            local timbre_val = math.floor((st.seed / 255) * 127)
+            timbre_val = math.floor(timbre_val * (st.mpe_timbre_amt / 16))
+            timbre_val = math.max(0, math.min(127, timbre_val))
+            midi_cc(74, timbre_val, out_ch)
+        end
     end
 
     midi_note_on(note_val, vel, out_ch)
     
-    -- Zero-Allocation Note Tracking
     for j=1, 16 do
         if not v[voice_idx].active_notes[j].active then
             v[voice_idx].active_notes[j].note = note_val
@@ -226,6 +230,10 @@ end
 
 local function seq_tick()
     if not is_playing then return end
+
+    if st.clock_out then
+        midi_out({0xF8}) -- Send MIDI Clock Tick
+    end
 
     local ticks_per_step = 24
     if st.time_div == 2 then ticks_per_step = 12
@@ -258,7 +266,7 @@ local function update_tempo()
 end
 
 -- ============================================================
--- MIDI IN CALLBACK (PATCHED)
+-- MIDI IN CALLBACK
 -- ============================================================
 function event_midi(b1, b2, b3)
     local status = b1 & 0xF0
@@ -293,7 +301,6 @@ function event_midi(b1, b2, b3)
         end
     elseif status == 0x80 or (status == 0x90 and b3 == 0) then
         if st.olafur_on then
-            -- Swap-and-Pop (Zero-Allocation)
             for i=1, olafur_count do
                 if olafur_notes[i] == b2 then
                     olafur_notes[i] = olafur_notes[olafur_count]
@@ -316,7 +323,7 @@ function event_midi(b1, b2, b3)
 end
 
 -- ============================================================
--- SNAPSHOTS (PATCHED)
+-- SNAPSHOTS
 -- ============================================================
 local function pack_state()
     local s = {}
@@ -565,7 +572,10 @@ function event_grid(x, y, z)
             elseif x == 4 then 
                 st.clock_in = not st.clock_in
                 update_tempo()
-            elseif x == 5 then st.clock_out = not st.clock_out end
+            elseif x == 5 then 
+                st.clock_out = not st.clock_out 
+                if st.clock_out then midi_out({0xFA}) else midi_out({0xFC}) end
+            end
         elseif y == 6 and is_press then 
             st.bpm_coarse = x
             update_tempo()
