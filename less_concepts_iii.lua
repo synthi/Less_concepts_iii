@@ -1,4 +1,4 @@
---- less concepts iii (v4.2- AUDITED MPE Edition)
+--- less concepts iii (v5.0 - THE MASTERPIECE)
 --- Monolithic Standalone Port for iii
 ---
 --- PAGE 1: PERFORMANCE
@@ -32,7 +32,6 @@
 --- R8: Page Nav (14-16)
 
 
-
 local FPS = 60
 local PPQN = 24
 
@@ -56,7 +55,7 @@ local st = {
     olafur_on = false, mpe_in = false, mpe_out = false,
     clock_in = false, clock_out = false, midi_in_ch = 1, midi_out_ch = 1,
     mpe_vel_amt = 8, mpe_ratchet_amt = 4, mpe_timbre_amt = 8, cycle_mode = 0,
-    momentary = {false, false}
+    active_snap = 0
 }
 
 local v = {
@@ -64,9 +63,9 @@ local v = {
     { bits = {0,0,0,0,0,0,0,1}, mute = false, oct = 0, gate_prob = 16, trans_prob = 1, active_notes = {} }
 }
 
--- Pre-allocate active notes (Zero-Allocation policy)
+-- Zero-Allocation Note Tracking (Added last_vel for ratcheting)
 for i=1,2 do
-    for j=1, 16 do v[i].active_notes[j] = {note=0, ch=0, active=false} end
+    for j=1, 16 do v[i].active_notes[j] = {note=0, ch=0, last_vel=0, active=false} end
 end
 
 local seed_bin = {0,0,0,0,0,0,0,0}
@@ -208,7 +207,6 @@ local function trigger_voice(voice_idx)
     if st.mpe_out then
         out_ch = get_next_mpe_ch()
         if st.mpe_timbre_amt > 1 then
-            -- Generative Timbre based on Cellular Automata Seed
             local timbre_val = math.floor((st.seed / 255) * 127)
             timbre_val = math.floor(timbre_val * (st.mpe_timbre_amt / 16))
             timbre_val = math.max(0, math.min(127, timbre_val))
@@ -222,35 +220,115 @@ local function trigger_voice(voice_idx)
         if not v[voice_idx].active_notes[j].active then
             v[voice_idx].active_notes[j].note = note_val
             v[voice_idx].active_notes[j].ch = out_ch
+            v[voice_idx].active_notes[j].last_vel = vel
             v[voice_idx].active_notes[j].active = true
             break
         end
     end
 end
 
+-- ============================================================
+-- SNAPSHOTS & CYCLING
+-- ============================================================
+local function pack_state()
+    local s = {}
+    for k,val in pairs(st) do 
+        if type(val) ~= "table" then s[k] = val end 
+    end
+    s.v1_bits = {table.unpack(v[1].bits)}
+    s.v2_bits = {table.unpack(v[2].bits)}
+    s.v1_oct = v[1].oct; s.v2_oct = v[2].oct
+    s.v1_gp = v[1].gate_prob; s.v2_gp = v[2].gate_prob
+    s.v1_tp = v[1].trans_prob; s.v2_tp = v[2].trans_prob
+    return s
+end
+
+local function unpack_state(s)
+    if not s then return end
+    for k,val in pairs(s) do 
+        if st[k] ~= nil and type(st[k]) ~= "table" then st[k] = val end 
+    end
+    v[1].bits = {table.unpack(s.v1_bits)}
+    v[2].bits = {table.unpack(s.v2_bits)}
+    v[1].oct = s.v1_oct; v[2].oct = s.v2_oct
+    v[1].gate_prob = s.v1_gp; v[2].gate_prob = s.v2_gp
+    v[1].trans_prob = s.v1_tp; v[2].trans_prob = s.v2_tp
+    update_binaries()
+end
+
+local function cycle_snapshots()
+    if st.cycle_mode == 0 then return end
+    
+    local available = {}
+    for i=1, 16 do if snaps[i] then table.insert(available, i) end end
+    if #available < 2 then return end
+
+    local current_idx = 1
+    for i=1, #available do
+        if available[i] == st.active_snap then current_idx = i break end
+    end
+
+    local next_idx = current_idx
+    if st.cycle_mode == 1 then -- < (Prev)
+        next_idx = current_idx - 1
+        if next_idx < 1 then next_idx = #available end
+    elseif st.cycle_mode == 2 then -- > (Next)
+        next_idx = current_idx + 1
+        if next_idx > #available then next_idx = 1 end
+    elseif st.cycle_mode == 3 then -- ~ (Random)
+        next_idx = math.random(1, #available)
+    end
+
+    st.active_snap = available[next_idx]
+    unpack_state(snaps[st.active_snap])
+end
+
+-- ============================================================
+-- TIME ENGINE (WITH PER-NOTE RATCHET)
+-- ============================================================
 local function seq_tick()
     if not is_playing then return end
 
-    if st.clock_out then
-        midi_out({0xF8}) -- Send MIDI Clock Tick
-    end
+    if st.clock_out then midi_out({0xF8}) end
 
-    local ticks_per_step = 24
-    if st.time_div == 2 then ticks_per_step = 12
-    elseif st.time_div == 3 then ticks_per_step = 6 end
+    local step_ticks = 24
+    if st.time_div == 2 then step_ticks = 12
+    elseif st.time_div == 3 then step_ticks = 6 end
 
-    if st.mpe_ratchet_amt > 1 then
-        local mod = (global_cc2 - 64) / 64
-        if mod > 0.5 then ticks_per_step = math.max(3, math.floor(ticks_per_step / 2))
-        elseif mod < -0.5 then ticks_per_step = ticks_per_step * 2 end
-    end
-
-    if tick_counter % ticks_per_step == 0 then
+    -- Main CA Step
+    if tick_counter % step_ticks == 0 then
         notes_off(1)
         notes_off(2)
         bang()
         trigger_voice(1)
         trigger_voice(2)
+        
+        -- Cycle Snapshots every 96 ticks (1 bar)
+        if tick_counter == 0 then cycle_snapshots() end
+    else
+        -- Sub-step Per-Note Ratcheting
+        if st.mpe_ratchet_amt > 1 then
+            for voice_idx = 1, 2 do
+                for j = 1, 16 do
+                    local n = v[voice_idx].active_notes[j]
+                    if n.active then
+                        local r_val = global_cc2
+                        if st.mpe_in and st.olafur_on and olafur_cc74[n.note] then
+                            r_val = olafur_cc74[n.note]
+                        end
+                        
+                        local sub_div = 0
+                        if r_val > 96 then sub_div = math.floor(step_ticks / 4)
+                        elseif r_val > 64 then sub_div = math.floor(step_ticks / 2) end
+                        
+                        if sub_div > 0 and tick_counter % sub_div == 0 then
+                            midi_note_off(n.note, 0, n.ch)
+                            midi_note_on(n.note, n.last_vel, n.ch)
+                        end
+                    end
+                end
+            end
+        end
     end
 
     tick_counter = (tick_counter + 1) % 96
@@ -323,36 +401,6 @@ function event_midi(b1, b2, b3)
 end
 
 -- ============================================================
--- SNAPSHOTS
--- ============================================================
-local function pack_state()
-    local s = {}
-    for k,val in pairs(st) do 
-        if type(val) ~= "table" then s[k] = val end 
-    end
-    s.v1_bits = {table.unpack(v[1].bits)}
-    s.v2_bits = {table.unpack(v[2].bits)}
-    s.v1_oct = v[1].oct; s.v2_oct = v[2].oct
-    s.v1_gp = v[1].gate_prob; s.v2_gp = v[2].gate_prob
-    s.v1_tp = v[1].trans_prob; s.v2_tp = v[2].trans_prob
-    return s
-end
-
-local function unpack_state(s)
-    if not s then return end
-    for k,val in pairs(s) do 
-        if st[k] ~= nil and type(st[k]) ~= "table" then st[k] = val end 
-    end
-    v[1].bits = {table.unpack(s.v1_bits)}
-    v[2].bits = {table.unpack(s.v2_bits)}
-    v[1].oct = s.v1_oct; v[2].oct = s.v2_oct
-    v[1].gate_prob = s.v1_gp; v[2].gate_prob = s.v2_gp
-    v[1].trans_prob = s.v1_tp; v[2].trans_prob = s.v2_tp
-    update_binaries()
-    update_tempo()
-end
-
--- ============================================================
 -- GRID UI & DELTA RENDER
 -- ============================================================
 local function clear_buffer()
@@ -395,13 +443,15 @@ local function draw_page_1()
         g_buf[i][5] = (st.high == i) and 13 or 3
     end
 
-    g_buf[1][6] = st.momentary[1] and 6 or 6
-    g_buf[2][6] = st.momentary[2] and 6 or 6
     g_buf[8][6] = st.olafur_on and lut_sin[(frame_counter % 60) + 1] or 4
     for i=9, 11 do g_buf[i][6] = (st.cycle_mode == i-8) and 14 or 5 end
 
     for i=1, 16 do
-        if snaps[i] then g_buf[i][7] = 6 else g_buf[i][7] = 0 end
+        if snaps[i] then 
+            g_buf[i][7] = (st.active_snap == i) and 15 or 6 
+        else 
+            g_buf[i][7] = 0 
+        end
     end
 
     local pulse = lut_sin[(frame_counter % 60) + 1]
@@ -509,17 +559,27 @@ function event_grid(x, y, z)
             elseif x == 9 then v[2].mute = not v[2].mute
             elseif x >= 10 then v[2].oct = x - 13 end
         elseif y == 3 and is_press then
-            st.seed = math.random(0, 255)
-            st.rule = math.random(0, 255)
-            update_binaries()
+            -- Specific Randomizations
+            if x == 1 then st.seed = math.random(0, 255); update_binaries()
+            elseif x == 2 then st.rule = math.random(0, 255); update_binaries()
+            elseif x == 4 then v[1].bits[math.random(1,8)] = 1 - v[1].bits[math.random(1,8)]
+            elseif x == 5 then v[2].bits[math.random(1,8)] = 1 - v[2].bits[math.random(1,8)]
+            elseif x == 7 then st.low = math.random(1, 16)
+            elseif x == 8 then st.high = math.random(1, 16)
+            elseif x == 10 then v[1].oct = math.random(-3, 3)
+            elseif x == 11 then v[2].oct = math.random(-3, 3)
+            elseif x == 13 then st.time_div = math.random(1, 3)
+            elseif x == 16 then 
+                st.seed = math.random(0, 255); st.rule = math.random(0, 255)
+                st.low = math.random(1, 16); st.high = math.random(1, 16)
+                v[1].oct = math.random(-3, 3); v[2].oct = math.random(-3, 3)
+                update_binaries()
+            end
         elseif y == 4 and is_press then st.low = x
         elseif y == 5 and is_press then st.high = x
-        elseif y == 6 then
-            if x == 1 or x == 2 then st.momentary[x] = is_press end
-            if is_press then
-                if x == 8 then st.olafur_on = not st.olafur_on
-                elseif x >= 9 and x <= 11 then st.cycle_mode = x - 8 end
-            end
+        elseif y == 6 and is_press then
+            if x == 8 then st.olafur_on = not st.olafur_on
+            elseif x >= 9 and x <= 11 then st.cycle_mode = x - 8 end
         elseif y == 7 then
             if is_press then
                 snap_press_time[x] = frame_counter
@@ -528,16 +588,20 @@ function event_grid(x, y, z)
                 if dur > 48 then 
                     snaps[x] = nil
                     pset_write(x, nil)
+                    if st.active_snap == x then st.active_snap = 0 end
                 else
                     if snaps[x] == nil then
                         snaps[x] = pack_state()
                         pset_write(x, snaps[x])
+                        st.active_snap = x
                     else
                         if frame_counter - snap_last_tap[x] < 18 then 
                             snaps[x] = pack_state()
                             pset_write(x, snaps[x])
+                            st.active_snap = x
                         else
                             unpack_state(snaps[x])
+                            st.active_snap = x
                         end
                     end
                 end
