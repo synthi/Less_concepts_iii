@@ -1,4 +1,4 @@
---- less concepts iii (v4.0 - MPE Edition)
+--- less concepts iii (v4.1 - AUDITED MPE Edition)
 --- Monolithic Standalone Port for iii
 ---
 --- PAGE 1: PERFORMANCE
@@ -31,64 +31,32 @@
 --- R7: BPM Fine +0..+9 (1-10)
 --- R8: Page Nav (14-16)
 
--- ============================================================
--- CONSTANTS & LUTS (Zero-Allocation)
--- ============================================================
+
+
 local FPS = 60
 local PPQN = 24
 
--- Sine Wave LUT for organic pulsing (60 steps)
 local lut_sin = {}
 for i = 1, 60 do
     lut_sin[i] = math.floor(11 + 3 * math.sin((i / 60) * math.pi * 2))
 end
 
--- Hardcoded Scales (Intervals)
 local scales = {
-    {0, 2, 4, 5, 7, 9, 11}, -- 1: Major
-    {0, 2, 3, 5, 7, 8, 10}, -- 2: Minor
-    {0, 2, 3, 5, 7, 9, 10}, -- 3: Dorian
-    {0, 1, 3, 5, 7, 8, 10}, -- 4: Phrygian
-    {0, 2, 4, 6, 7, 9, 11}, -- 5: Lydian
-    {0, 2, 4, 5, 7, 9, 10}, -- 6: Mixolydian
-    {0, 1, 3, 5, 6, 8, 10}, -- 7: Locrian
-    {0, 2, 4, 7, 9},        -- 8: Pentatonic Major
-    {0, 3, 5, 7, 10},       -- 9: Pentatonic Minor
-    {0, 2, 3, 5, 7, 8, 11}, -- 10: Harmonic Minor
-    {0, 2, 3, 5, 7, 9, 11}, -- 11: Melodic Minor
-    {0, 2, 4, 6, 8, 10},    -- 12: Whole Tone
-    {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}, -- 13: Chromatic
-    {0, 3, 5, 6, 7, 10},    -- 14: Blues
-    {0, 1, 4, 5, 7, 8, 11}, -- 15: Double Harmonic
-    {0, 2, 4, 7, 8}         -- 16: Hirajoshi
+    {0, 2, 4, 5, 7, 9, 11}, {0, 2, 3, 5, 7, 8, 10}, {0, 2, 3, 5, 7, 9, 10},
+    {0, 1, 3, 5, 7, 8, 10}, {0, 2, 4, 6, 7, 9, 11}, {0, 2, 4, 5, 7, 9, 10},
+    {0, 1, 3, 5, 6, 8, 10}, {0, 2, 4, 7, 9},        {0, 3, 5, 7, 10},
+    {0, 2, 3, 5, 7, 8, 11}, {0, 2, 3, 5, 7, 9, 11}, {0, 2, 4, 6, 8, 10},
+    {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11},         {0, 3, 5, 6, 7, 10},
+    {0, 1, 4, 5, 7, 8, 11}, {0, 2, 4, 7, 8}
 }
 
--- ============================================================
--- STATE & MEMORY (Pre-allocated)
--- ============================================================
 local st = {
-    page = 1,
-    seed = 36,
-    rule = 30,
-    low = 1,
-    high = 14,
-    scale = 1,
-    bpm_coarse = 6, -- 120 BPM (60 + 6*10)
-    bpm_fine = 0,
-    bpm = 120,
-    time_div = 2, -- 1=1/4, 2=1/8, 3=1/16
-    olafur_on = false,
-    mpe_in = false,
-    mpe_out = false,
-    clock_in = false,
-    clock_out = false,
-    midi_in_ch = 1,
-    midi_out_ch = 1,
-    mpe_vel_amt = 8,
-    mpe_ratchet_amt = 4,
-    mpe_timbre_amt = 8,
-    cycle_mode = 0, -- 0:off, 1:<, 2:>, 3:~
-    momentary = {false, false}
+    page = 1, seed = 36, rule = 30, low = 1, high = 14, scale = 1,
+    bpm_coarse = 6, bpm_fine = 0, bpm = 120, time_div = 2,
+    olafur_on = false, mpe_in = false, mpe_out = false,
+    clock_in = false, clock_out = false, midi_in_ch = 1, midi_out_ch = 1,
+    mpe_vel_amt = 8, mpe_ratchet_amt = 4, mpe_timbre_amt = 8, cycle_mode = 0,
+    momentary = {false, false} -- Will not be saved in snapshots
 }
 
 local v = {
@@ -96,10 +64,14 @@ local v = {
     { bits = {0,0,0,0,0,0,0,1}, mute = false, oct = 0, gate_prob = 16, trans_prob = 1, active_notes = {} }
 }
 
+-- Pre-allocate active notes (Zero-Allocation policy)
+for i=1,2 do
+    for j=1, 16 do v[i].active_notes[j] = {note=0, ch=0, active=false} end
+end
+
 local seed_bin = {0,0,0,0,0,0,0,0}
 local rule_bin = {0,0,0,0,0,0,0,0}
 
--- Olafur Pool
 local olafur_notes = {}
 local olafur_count = 0
 local olafur_pressure = {}
@@ -109,11 +81,9 @@ for i=0, 127 do
     olafur_cc74[i] = 64 
 end
 
--- Global Fallback CCs
 local global_cc1 = 64
 local global_cc2 = 64
 
--- Grid Buffers
 local g_buf = {}
 local g_shd = {}
 local g_press = {}
@@ -128,7 +98,6 @@ for x = 1, 16 do
     end
 end
 
--- Snapshots
 local snaps = {}
 local snap_press_time = {}
 local snap_last_tap = {}
@@ -138,7 +107,6 @@ for i = 1, 16 do
     snap_last_tap[i] = 0
 end
 
--- Engine Variables
 local tick_counter = 0
 local frame_counter = 0
 local mpe_out_rotator = 2
@@ -147,7 +115,7 @@ local metro_seq = nil
 local metro_ui = nil
 
 -- ============================================================
--- MATH & CELLULAR AUTOMATA
+-- MATH & CELLULAR AUTOMATA (PATCHED)
 -- ============================================================
 local function update_binaries()
     for i = 0, 7 do
@@ -159,10 +127,11 @@ end
 local function bang()
     local next_seed = 0
     for i = 0, 7 do
-        local left = seed_bin[((i + 1) % 8) + 1]
-        local center = seed_bin[i + 1]
-        local right = seed_bin[((i - 1 + 8) % 8) + 1]
-        local idx = (left << 2) | (center << 1) | right
+        -- Corrected bitwise neighborhood mapping
+        local left_bit = seed_bin[8 - ((i + 1) % 8)]
+        local center_bit = seed_bin[8 - i]
+        local right_bit = seed_bin[8 - ((i - 1 + 8) % 8)]
+        local idx = (left_bit << 2) | (center_bit << 1) | right_bit
         local bit = (st.rule >> idx) & 1
         next_seed = next_seed | (bit << i)
     end
@@ -171,7 +140,7 @@ local function bang()
 end
 
 -- ============================================================
--- MIDI & MPE ENGINE
+-- MIDI & MPE ENGINE (PATCHED)
 -- ============================================================
 local function get_next_mpe_ch()
     local ch = mpe_out_rotator
@@ -181,11 +150,12 @@ local function get_next_mpe_ch()
 end
 
 local function notes_off(voice_idx)
-    for i = 1, #v[voice_idx].active_notes do
-        local n = v[voice_idx].active_notes[i]
-        midi_note_off(n.note, 0, n.ch)
+    for j = 1, 16 do
+        if v[voice_idx].active_notes[j].active then
+            midi_note_off(v[voice_idx].active_notes[j].note, 0, v[voice_idx].active_notes[j].ch)
+            v[voice_idx].active_notes[j].active = false
+        end
     end
-    v[voice_idx].active_notes = {}
 end
 
 local function trigger_voice(voice_idx)
@@ -200,11 +170,8 @@ local function trigger_voice(voice_idx)
     end
     
     if not bit_active then return end
-
-    -- Gate Probability
     if math.random(1, 16) > v[voice_idx].gate_prob then return end
 
-    -- Determine Note
     local note_val = 60
     local pressure = global_cc1
     local cc74 = global_cc2
@@ -225,7 +192,6 @@ local function trigger_voice(voice_idx)
         note_val = 48 + (oct * 12) + scale[degree]
     end
 
-    -- Transpose Probability
     if math.random(1, 16) <= v[voice_idx].trans_prob then
         note_val = note_val + (math.random(0, 1) == 0 and -12 or 12)
     end
@@ -233,47 +199,40 @@ local function trigger_voice(voice_idx)
     note_val = note_val + (v[voice_idx].oct * 12)
     note_val = math.max(0, math.min(127, note_val))
 
-    -- Velocity Calculation
     local vel = 100
     if st.mpe_vel_amt > 1 then
         local mod = (pressure - 64) * (st.mpe_vel_amt / 8)
         vel = math.max(1, math.min(127, math.floor(100 + mod)))
     end
 
-    -- MPE Out Routing
     local out_ch = st.midi_out_ch
     if st.mpe_out then
         out_ch = get_next_mpe_ch()
-        if st.mpe_timbre_amt > 1 then
-            local timbre_val = math.floor((st.seed / 255) * 127)
-            -- Send CC74 before Note On (iii API requires raw bytes for CC if midi_cc doesn't exist, assuming midi_note_on is standard)
-            -- If iii has midi_cc, use it. Otherwise, we skip CC out to avoid API hallucination.
-            -- We will stick to strictly authorized functions: midi_note_on
-        end
+        -- CC74 logic omitted to strictly adhere to authorized iii API (midi_note_on)
     end
 
     midi_note_on(note_val, vel, out_ch)
-    table.insert(v[voice_idx].active_notes, {note = note_val, ch = out_ch})
+    
+    -- Zero-Allocation Note Tracking
+    for j=1, 16 do
+        if not v[voice_idx].active_notes[j].active then
+            v[voice_idx].active_notes[j].note = note_val
+            v[voice_idx].active_notes[j].ch = out_ch
+            v[voice_idx].active_notes[j].active = true
+            break
+        end
+    end
 end
 
 local function seq_tick()
     if not is_playing then return end
 
-    if st.clock_out then
-        -- Send MIDI Clock Tick (0xF8)
-        -- Assuming iii allows raw midi out via a generic function, but to avoid hallucination, 
-        -- we only use authorized functions. If none exists for raw bytes, we omit.
-    end
-
-    -- Time Div Logic (24 PPQN base)
-    -- 1=1/4 (24 ticks), 2=1/8 (12 ticks), 3=1/16 (6 ticks)
     local ticks_per_step = 24
     if st.time_div == 2 then ticks_per_step = 12
     elseif st.time_div == 3 then ticks_per_step = 6 end
 
-    -- Ratchet Mod (MPE CC74 or CC2)
     if st.mpe_ratchet_amt > 1 then
-        local mod = (global_cc2 - 64) / 64 -- -1.0 to 1.0
+        local mod = (global_cc2 - 64) / 64
         if mod > 0.5 then ticks_per_step = math.max(3, math.floor(ticks_per_step / 2))
         elseif mod < -0.5 then ticks_per_step = ticks_per_step * 2 end
     end
@@ -291,19 +250,20 @@ end
 
 local function update_tempo()
     st.bpm = 60 + (st.bpm_coarse * 10) + st.bpm_fine
-    if not st.clock_in and metro_seq then
-        metro_seq:start(60.0 / (st.bpm * 24))
+    if st.clock_in then
+        if metro_seq then metro_seq:stop() end
+    else
+        if metro_seq then metro_seq:start(60.0 / (st.bpm * 24)) end
     end
 end
 
 -- ============================================================
--- MIDI IN CALLBACK
+-- MIDI IN CALLBACK (PATCHED)
 -- ============================================================
 function event_midi(b1, b2, b3)
     local status = b1 & 0xF0
     local ch = (b1 & 0x0F) + 1
 
-    -- Clock In
     if status == 0xF8 and st.clock_in then
         seq_tick()
         return
@@ -318,10 +278,8 @@ function event_midi(b1, b2, b3)
         return
     end
 
-    -- Filter by Channel (unless MPE IN is active)
     if not st.mpe_in and ch ~= st.midi_in_ch then return end
 
-    -- Note On
     if status == 0x90 and b3 > 0 then
         if st.olafur_on then
             local exists = false
@@ -333,23 +291,21 @@ function event_midi(b1, b2, b3)
                 olafur_notes[olafur_count] = b2
             end
         end
-    -- Note Off
     elseif status == 0x80 or (status == 0x90 and b3 == 0) then
         if st.olafur_on then
+            -- Swap-and-Pop (Zero-Allocation)
             for i=1, olafur_count do
                 if olafur_notes[i] == b2 then
-                    table.remove(olafur_notes, i)
+                    olafur_notes[i] = olafur_notes[olafur_count]
                     olafur_count = olafur_count - 1
                     break
                 end
             end
         end
-    -- Channel Pressure
     elseif status == 0xD0 then
         if st.mpe_in then
             for i=1, olafur_count do olafur_pressure[olafur_notes[i]] = b2 end
         end
-    -- CC
     elseif status == 0xB0 then
         if b2 == 74 and st.mpe_in then
             for i=1, olafur_count do olafur_cc74[olafur_notes[i]] = b3 end
@@ -360,11 +316,13 @@ function event_midi(b1, b2, b3)
 end
 
 -- ============================================================
--- SNAPSHOTS
+-- SNAPSHOTS (PATCHED)
 -- ============================================================
 local function pack_state()
     local s = {}
-    for k,v in pairs(st) do s[k] = v end
+    for k,val in pairs(st) do 
+        if type(val) ~= "table" then s[k] = val end 
+    end
     s.v1_bits = {table.unpack(v[1].bits)}
     s.v2_bits = {table.unpack(v[2].bits)}
     s.v1_oct = v[1].oct; s.v2_oct = v[2].oct
@@ -376,7 +334,7 @@ end
 local function unpack_state(s)
     if not s then return end
     for k,val in pairs(s) do 
-        if st[k] ~= nil then st[k] = val end 
+        if st[k] ~= nil and type(st[k]) ~= "table" then st[k] = val end 
     end
     v[1].bits = {table.unpack(s.v1_bits)}
     v[2].bits = {table.unpack(s.v2_bits)}
@@ -412,7 +370,6 @@ local function flush_grid()
 end
 
 local function draw_page_1()
-    -- V1 & V2
     for i=1, 8 do
         g_buf[i][1] = v[1].bits[i] == 1 and 12 or 4
         g_buf[i][2] = v[2].bits[i] == 1 and 12 or 4
@@ -424,39 +381,32 @@ local function draw_page_1()
         g_buf[i][2] = (v[2].oct == i-13) and 14 or 4
     end
 
-    -- Randomize
     for i=1, 16 do g_buf[i][3] = 5 end
 
-    -- Limits
     for i=1, 16 do
         g_buf[i][4] = (st.low == i) and 12 or 2
         g_buf[i][5] = (st.high == i) and 13 or 3
     end
 
-    -- Controls
-    g_buf[1][6] = st.momentary[1] and 15 or 6
-    g_buf[2][6] = st.momentary[2] and 15 or 6
+    g_buf[1][6] = st.momentary[1] and 6 or 6
+    g_buf[2][6] = st.momentary[2] and 6 or 6
     g_buf[8][6] = st.olafur_on and lut_sin[(frame_counter % 60) + 1] or 4
     for i=9, 11 do g_buf[i][6] = (st.cycle_mode == i-8) and 14 or 5 end
 
-    -- Snapshots
     for i=1, 16 do
         if snaps[i] then g_buf[i][7] = 6 else g_buf[i][7] = 0 end
     end
 
-    -- Time Divs
     local pulse = lut_sin[(frame_counter % 60) + 1]
     for i=1, 3 do g_buf[i][8] = (st.time_div == i) and pulse or 4 end
 end
 
 local function draw_page_2()
-    -- Seed & Rule
     for i=1, 8 do
         g_buf[i][1] = seed_bin[i] == 1 and 14 or 4
         g_buf[i+8][1] = rule_bin[i] == 1 and 10 or 2
     end
 
-    -- Probs
     for i=1, 16 do
         g_buf[i][2] = (i <= v[1].gate_prob) and 5 or 0
         if i == v[1].gate_prob then g_buf[i][2] = 12 end
@@ -471,20 +421,17 @@ local function draw_page_2()
         if i == v[2].trans_prob then g_buf[i][5] = 12 end
     end
 
-    -- Scales
     for i=1, 16 do g_buf[i][6] = (st.scale == i) and 14 or 3 end
 
-    -- Olafur Vis
     if st.olafur_on then
         for i=1, olafur_count do
             local x = ((olafur_notes[i] % 12) + 1)
-            g_buf[x][7] = math.floor(5 + (olafur_pressure[olafur_notes[i]] / 127) * 10)
+            g_buf[x][7] = math.floor(5 + (olafur_pressure[olafur_notes[i]] / 127) * 9)
         end
     end
 end
 
 local function draw_page_3()
-    -- MPE IN
     for i=1, 8 do
         g_buf[i][1] = (i <= st.mpe_vel_amt) and 6 or 0
         if i == st.mpe_vel_amt then g_buf[i][1] = 12 end
@@ -493,25 +440,21 @@ local function draw_page_3()
         if i == st.mpe_ratchet_amt then g_buf[i+8][1] = 12 end
     end
 
-    -- MPE OUT
     for i=1, 16 do
         g_buf[i][2] = (i <= st.mpe_timbre_amt) and 6 or 0
         if i == st.mpe_timbre_amt then g_buf[i][2] = 12 end
     end
 
-    -- MIDI CH
     for i=1, 16 do
         g_buf[i][3] = (st.midi_in_ch == i) and 12 or 3
         g_buf[i][4] = (st.midi_out_ch == i) and 12 or 3
     end
 
-    -- Toggles
     g_buf[1][5] = st.mpe_in and 14 or 4
     g_buf[2][5] = st.mpe_out and 14 or 4
     g_buf[4][5] = st.clock_in and 14 or 4
     g_buf[5][5] = st.clock_out and 14 or 4
 
-    -- BPM
     local pulse = lut_sin[(frame_counter % 60) + 1]
     for i=1, 16 do
         g_buf[i][6] = (st.bpm_coarse == i) and pulse or 4
@@ -530,7 +473,6 @@ local function ui_tick()
     elseif st.page == 3 then draw_page_3()
     end
 
-    -- Global Nav
     g_buf[14][8] = (st.page == 1) and 14 or 4
     g_buf[15][8] = (st.page == 2) and 14 or 4
     g_buf[16][8] = (st.page == 3) and 14 or 4
@@ -545,7 +487,6 @@ function event_grid(x, y, z)
     local is_press = (z == 1)
     g_press[x][y] = is_press
 
-    -- Global Nav
     if y == 8 and x >= 14 and is_press then
         st.page = x - 13
         return
@@ -577,7 +518,7 @@ function event_grid(x, y, z)
                 snap_press_time[x] = frame_counter
             else
                 local dur = frame_counter - snap_press_time[x]
-                if dur > 48 then -- Long press (>800ms)
+                if dur > 48 then 
                     snaps[x] = nil
                     pset_write(x, nil)
                 else
@@ -585,7 +526,7 @@ function event_grid(x, y, z)
                         snaps[x] = pack_state()
                         pset_write(x, snaps[x])
                     else
-                        if frame_counter - snap_last_tap[x] < 18 then -- Double tap (<300ms)
+                        if frame_counter - snap_last_tap[x] < 18 then 
                             snaps[x] = pack_state()
                             pset_write(x, snaps[x])
                         else
@@ -640,13 +581,11 @@ end
 -- ============================================================
 update_binaries()
 
--- Load PSETs (Snapshots)
 for i = 1, 16 do
     local ok, data = pcall(pset_read, i)
     if ok and data then snaps[i] = data end
 end
 
--- Start Metros
 metro_ui = metro.init(ui_tick, 1.0 / FPS)
 metro_ui:start()
 
